@@ -1,0 +1,216 @@
+---
+title: "A quick flight to the edge of Data Science: Tidy Modelling with R""
+output: html_document
+---
+
+## 
+
+### Meet the data
+
+In this sections, we'll build a multiclass classifier for classifying penguins!
+
+The `palmerpenguins` data contains size measurements for three penguin species observed on three islands in the Palmer Archipelago, Antarctica.
+
+### A quick look at the data
+
+```{r}
+# Load the required packages and make them available in your current R session
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(tidymodels)
+})
+
+# Import data
+penguins <- read_csv("penguins.csv", show_col_types = FALSE) %>% 
+  mutate(species = factor(species))
+
+# View the first 10 observations
+penguins %>%
+  slice_head(n = 10)
+
+dim(penguins)
+```
+
+The data contains the following columns:
+
+The **species** column containing penguin species `Adelie`, `Chinstrap`, or `Gentoo`, is the label we want to train a model to predict.
+
+```{r}
+# Check missing values
+anyNA(penguins)
+```
+
+No missing values. Good start!
+
+For brevity, let's make one exploratory plot.
+
+```{r}
+# Pivot data to a long format
+penguins_select_long <- penguins %>% 
+  pivot_longer(!species, names_to = "predictors", values_to = "values")
+
+penguins_select_long %>% 
+  slice_sample(n = 10)
+
+# Make box plots
+theme_set(theme_light())
+penguins_select_long %>%
+  ggplot(mapping = aes(x = species, y = values, fill = predictors)) +
+  geom_boxplot() +
+  facet_wrap(~predictors, scales = "free") +
+  paletteer::scale_fill_paletteer_d("nbapalettes::supersonics_holiday") +
+  theme(legend.position = "none")
+  
+```
+
+From the box plots, it looks like species `Adelie` and `Chinstrap` have similar data profiles for bill_depth, flipper_length, and body_mass, but Chinstraps tend to have longer bill_length. `Gentoo` tends to have fairly clearly differentiated features from the others; which should help us train a good classification model.
+
+## Build a model
+
+### 1. Data budgeting
+
+To get started, let's split this single dataset into two: a training set and a testing set. We'll keep most of the rows in the original dataset (subset chosen randomly) in the training set. The training data will be used to fit the model, and the testing set will be used to measure model performance.
+
+```{r}
+# For reproducibility
+set.seed(2056)
+
+# Split data 70%-30% into training set and test set
+penguins_split <- penguins %>% 
+  initial_split(prop = 0.70)
+
+# Extract data in each split
+penguins_train <- training(penguins_split)
+penguins_test <- testing(penguins_split)
+
+# Print the number of observations in each split
+cat("Training cases: ", nrow(penguins_train), "\n",
+    "Test cases: ", nrow(penguins_test), sep = "")
+```
+
+### 2. Make a model specifcation
+
+![Artwork by \@allison_horst](images/parsnip.png){width="500"}
+
+Tidymodels provides a unified interface to models that can be used to try a range of models by specifying three concepts:
+
+-   Model **type** differentiates models such as logistic regression, decision tree models, and so forth.
+
+-   Model **engine** is the computational tool which will be used to fit the model. Often these are R packages, such as "lm" or "ranger"
+
+-   Model **mode** includes common options like regression and classification; some model types support either of these while some only have one mode.
+
+```{r}
+# Specify a random forest model via ranger
+rf_spec <- rand_forest() %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+print(rf_spec)
+```
+
+```{r}
+# How you would train another model type
+# Notice how the subsequent steps still remain the same
+# Specify a multinomial logistic regression model via nnet
+rf_spec <- multinom_reg(penalty = 1) %>% 
+  set_engine("nnet") %>% 
+  set_mode("classification")
+
+print(rf_spec)
+```
+
+### 3. Train a model
+
+Now that your `penguins_train` data is ready, you can fit a set of models with tidymodels.
+
+```{r}
+# Train a regression model
+set.seed(2056)
+penguins_mod <- rf_spec %>% 
+  fit(species ~ ., data = penguins_train)
+
+# Print the model
+print(penguins_mod)
+```
+
+### 4. Evaluate Model using test data
+
+Now we can use the trained model to predict the labels for the test features, and evaluate performance. When making predictions, the tidymodels convention is to always produce a tibble of results with standardized column names.
+
+```{r}
+# Make predictions for the test set
+penguins_pred <- penguins_mod %>% 
+  predict(new_data = penguins_test)
+
+penguins_pred %>% 
+  slice_head(n = 10)
+```
+
+This makes it easy to combine the original data and the predictions in a usable format:
+
+```{r}
+# Combine predictions with test set
+penguins_results <- penguins_test %>% 
+  bind_cols(penguins_pred)
+
+# Print predictions
+penguins_results %>% 
+  slice_sample(n = 10)
+
+```
+
+Now, let's look at the confusion matrix for our model
+
+```{r}
+# Confusion matrix
+penguins_results %>% 
+  conf_mat(truth = species, estimate = .pred_class) %>% 
+  print()
+```
+
+The confusion matrix shows the intersection of predicted and actual label values for each class - in simple terms, the diagonal intersections from top-left to bottom-right indicate the number of correct predictions.
+
+When dealing with multiple classes, it's generally more intuitive to visualize this as a heat map, like this:
+
+```{r}
+update_geom_defaults(geom = "tile", new = list(color = "black", alpha = 0.7))
+# Visualize confusion matrix
+penguins_results %>% 
+  conf_mat(species, .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+The darker squares in the confusion matrix plot indicate high numbers of cases, and you can hopefully see a diagonal line of darker squares indicating cases where the predicted and actual label are the same.
+
+Let's now calculate summary statistics for the confusion matrix.
+
+Again, notice how the results of Tidymodels augment well with existing Tidy data Functions such as `Filter()`
+
+```{r}
+# Statistical summaries for the confusion matrix
+conf_mat(data = penguins_results, truth = species, estimate = .pred_class) %>% 
+  summary()  %>% 
+  filter(.metric %in% c("accuracy", "sens", "ppv"))
+```
+
+The tibble shows the overall metrics of how well the model performs across all three classes.
+
+Accuracy: The percentage of labels predicted accurately for a sample.
+
+Sensitivity: defined as the proportion of positive results out of the number of samples which were actually positive.
+
+Positive Predictive Value: defined as the proportion of predicted positives that are actually positive.
+
+Good job! A working model 🐧🐧!
+
+### **Wrapping up and next steps**
+
+![](images/giphy_p.gif){width="300"}
+
+Congratulations on building a random forest classification model in R. Some possible next steps (covered in the upcoming learning path) would be:
+
+-   Feature Engineering
+-   Tuning model hyperparameters
+-   Comparing performance across many models
+-   Deploying model to [Azure Machine Learning Studio](https://ml.azure.com/)
